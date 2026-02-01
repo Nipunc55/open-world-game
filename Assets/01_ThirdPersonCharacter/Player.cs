@@ -31,15 +31,37 @@ namespace Starter.ThirdPersonCharacter
 		public float AirDeceleration = 1.3f;
 
 		[Header("Sounds")]
-        public AudioClip[] FootstepAudioClips;
+		public AudioClip[] FootstepAudioClips;
 		public AudioClip LandingAudioClip;
 		[Range(0f, 1f)]
 		public float FootstepAudioVolume = 0.5f;
+		public AudioSource FireSound;
+
+		[Header("Fire Setup")]
+		public LayerMask HitMask;
+		public GameObject ImpactPrefab;
+		public ParticleSystem MuzzleParticle;
+
+		[Header("Aim Setup")]
+		public Transform ChestTargetPosition;
+		public Transform ChestBone;
+		public float AimRotationSpeed = 15f;
 
 		[Networked]
 		private NetworkBool _isJumping { get; set; }
+		[Networked]
+		private int _fireCount { get; set; }
+		[Networked]
+		private Vector3 _hitPosition { get; set; }
+		[Networked]
+		private Vector3 _hitNormal { get; set; }
+		[Networked]
+		public NetworkBool IsAiming { get; set; }
+		[Networked]
+		public Vector2 NetworkedLookRotation { get; set; }
 
 		private Vector3 _moveVelocity;
+		private int _visibleFireCount;
 
 		// Animation IDs
 		private int _animIDSpeed;
@@ -47,6 +69,20 @@ namespace Starter.ThirdPersonCharacter
 		private int _animIDJump;
 		private int _animIDFreeFall;
 		private int _animIDMotionSpeed;
+		private int _animIDShoot;
+		private int _animIDAim;
+
+		public override void Spawned()
+		{
+			// Reset visible fire count to match networked value on spawn
+			_visibleFireCount = _fireCount;
+
+			// Disable input for other players
+			if (HasStateAuthority == false)
+			{
+				PlayerInput.enabled = false;
+			}
+		}
 
 		public override void FixedUpdateNetwork()
 		{
@@ -63,11 +99,16 @@ namespace Starter.ThirdPersonCharacter
 
 		public override void Render()
 		{
+			
 			Animator.SetFloat(_animIDSpeed, KCC.RealSpeed, 0.15f, Time.deltaTime);
 			Animator.SetFloat(_animIDMotionSpeed, 1f);
 			Animator.SetBool(_animIDJump, _isJumping);
 			Animator.SetBool(_animIDGrounded, KCC.IsGrounded);
 			Animator.SetBool(_animIDFreeFall, KCC.RealVelocity.y < -10f);
+
+			Animator.SetBool(_animIDAim, IsAiming);
+
+			//ShowFireEffects();
 		}
 
 		private void Awake()
@@ -77,15 +118,25 @@ namespace Starter.ThirdPersonCharacter
 
 		private void LateUpdate()
 		{
-			// Only local player needs to update the camera
-			// Note: In shared mode the local player has always state authority over player's objects.
+			// Update camera pivot. For the local player we use direct input for maximum smoothness.
+			// For others we use the networked rotation.
+			Vector2 lookRotation = HasStateAuthority ? PlayerInput.CurrentInput.LookRotation : NetworkedLookRotation;
+			CameraPivot.rotation = Quaternion.Euler(lookRotation);
+
+			// Only local player needs to update the actual camera position
 			if (HasStateAuthority == false)
 				return;
 
-			// Update camera pivot and transfer properties from camera handle to Main Camera.
-			CameraPivot.rotation = Quaternion.Euler(PlayerInput.CurrentInput.LookRotation);
 			Camera.main.transform.SetPositionAndRotation(CameraHandle.position, CameraHandle.rotation);
-		}
+
+			// IK logic for aiming
+		// 	if (ChestBone != null && ChestTargetPosition != null && PlayerInput.CurrentInput.Aim)
+		// 	{
+		// 		float blendAmount = 0.1f;
+		// 		ChestBone.position = Vector3.Lerp(ChestTargetPosition.position, ChestBone.position, blendAmount);
+		// 		ChestBone.rotation = Quaternion.Lerp(ChestTargetPosition.rotation, ChestBone.rotation, blendAmount);
+		// 	}
+		 }
 
 		private void ProcessInput(GameplayInput input)
 		{
@@ -102,6 +153,10 @@ namespace Starter.ThirdPersonCharacter
 			// It feels better when the player falls quicker
 			KCC.SetGravity(KCC.RealVelocity.y >= 0f ? UpGravity : DownGravity);
 
+			// Synchronize networked properties
+			IsAiming = input.Aim;
+			NetworkedLookRotation = input.LookRotation;
+
 			float speed = input.Sprint ? SprintSpeed : WalkSpeed;
 
 			var lookRotation = Quaternion.Euler(0f, input.LookRotation.y, 0f);
@@ -110,7 +165,15 @@ namespace Starter.ThirdPersonCharacter
 			var desiredMoveVelocity = moveDirection * speed;
 
 			float acceleration;
-			if (desiredMoveVelocity == Vector3.zero)
+			if (input.Aim)
+			{
+				// Rotate the character towards camera direction when aiming
+				var nextRotation = Quaternion.Lerp(KCC.TransformRotation, lookRotation, AimRotationSpeed * Runner.DeltaTime);
+				KCC.SetLookRotation(nextRotation.eulerAngles);
+
+				acceleration = KCC.IsGrounded ? GroundAcceleration : AirAcceleration;
+			}
+			else if (desiredMoveVelocity == Vector3.zero)
 			{
 				// No desired move velocity - we are stopping
 				acceleration = KCC.IsGrounded ? GroundDeceleration : AirDeceleration;
@@ -136,6 +199,46 @@ namespace Starter.ThirdPersonCharacter
 			}
 
 			KCC.Move(_moveVelocity, jumpImpulse);
+
+			if (input.Fire)
+			{
+				Fire();
+			}
+		}
+
+		private void Fire()
+		{
+			_hitPosition = Vector3.zero;
+
+			// Raycast from camera center
+			if (Physics.Raycast(Camera.main.transform.position, Camera.main.transform.forward, out var hitInfo, 200f, HitMask))
+			{
+				_hitPosition = hitInfo.point;
+				_hitNormal = hitInfo.normal;
+
+				// Deal damage if hit something with Health component (like in Shooter example)
+				// var health = hitInfo.collider.GetComponentInParent<Health>();
+				// if (health != null) health.TakeHit(1);
+			}
+
+			_fireCount++;
+		}
+
+		private void ShowFireEffects()
+		{
+			if (_visibleFireCount < _fireCount)
+			{
+				if (FireSound != null) FireSound.PlayOneShot(FireSound.clip);
+				if (MuzzleParticle != null) MuzzleParticle.Play();
+				Animator.SetTrigger(_animIDShoot);
+
+				if (_hitPosition != Vector3.zero && ImpactPrefab != null)
+				{
+					Instantiate(ImpactPrefab, _hitPosition, Quaternion.LookRotation(_hitNormal));
+				}
+			}
+
+			_visibleFireCount = _fireCount;
 		}
 
 		private void AssignAnimationIDs()
@@ -145,6 +248,8 @@ namespace Starter.ThirdPersonCharacter
 			_animIDJump = Animator.StringToHash("Jump");
 			_animIDFreeFall = Animator.StringToHash("FreeFall");
 			_animIDMotionSpeed = Animator.StringToHash("MotionSpeed");
+			_animIDShoot = Animator.StringToHash("Shoot");
+			_animIDAim = Animator.StringToHash("Aim");
 		}
 
 		// Animation event
@@ -153,7 +258,7 @@ namespace Starter.ThirdPersonCharacter
 			if (animationEvent.animatorClipInfo.weight < 0.5f)
 				return;
 
-			if (FootstepAudioClips.Length > 0)
+			if (FootstepAudioClips != null && FootstepAudioClips.Length > 0)
 			{
 				var index = Random.Range(0, FootstepAudioClips.Length);
 				AudioSource.PlayClipAtPoint(FootstepAudioClips[index], KCC.Position, FootstepAudioVolume);
@@ -163,7 +268,8 @@ namespace Starter.ThirdPersonCharacter
 		// Animation event
 		private void OnLand(AnimationEvent animationEvent)
 		{
-			AudioSource.PlayClipAtPoint(LandingAudioClip, KCC.Position, FootstepAudioVolume);
+			if (LandingAudioClip != null)
+				AudioSource.PlayClipAtPoint(LandingAudioClip, KCC.Position, FootstepAudioVolume);
 		}
 	}
 }

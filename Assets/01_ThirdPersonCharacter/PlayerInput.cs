@@ -11,6 +11,8 @@ namespace Starter.ThirdPersonCharacter
 		public Vector2 MoveDirection;
 		public bool Jump;
 		public bool Sprint;
+		public bool Fire;
+		public bool Aim;
 	}
 
 	/// <summary>
@@ -23,10 +25,10 @@ namespace Starter.ThirdPersonCharacter
 
 		public void ResetInput()
 		{
-			// Reset input after it was used to detect changes correctly again
-			_input.MoveDirection = default;
+			// Reset one-shot trigger inputs only. 
+			// Continuous state inputs (Move, Sprint, Aim, Look) are managed in Update.
 			_input.Jump = false;
-			_input.Sprint = false;
+			_input.Fire = false;
 		}
 
 		private void Update()
@@ -45,7 +47,9 @@ namespace Starter.ThirdPersonCharacter
 			_input.MoveDirection = moveDirection.normalized;
 
 			_input.Jump |= Input.GetButtonDown("Jump");
-			_input.Sprint |= Input.GetButton("Sprint");
+			_input.Sprint = Input.GetButton("Sprint");
+			_input.Fire |= Input.GetButtonDown("Fire1");
+			_input.Aim = Input.GetButton("Fire2");
 		}
 
 		private Vector2 ClampLookRotation(Vector2 lookRotation)
